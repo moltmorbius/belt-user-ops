@@ -1,0 +1,22 @@
+{
+  "name": "belt-user-ops",
+  "version": "0.1.0",
+  "description": "Belt AA operations monitoring — UserOps, deployments, profit tracking",
+  "type": "module",
+  "scripts": {
+    "monitor": "tsx monitor.ts",
+    "dev": "tsx watch monitor.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@belt/utils": "workspace:*",
+    "graphql": "^16.8.1",
+    "graphql-request": "^6.1.0",
+    "viem": "^2.21.45"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.16",
+    "tsx": "^4.7.0",
+    "typescript": "^5.3.3"
+  }
+}
