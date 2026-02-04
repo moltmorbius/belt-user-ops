@@ -10,7 +10,6 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@belt/utils": "workspace:*",
     "graphql": "^16.8.1",
     "graphql-request": "^6.1.0",
     "viem": "^2.21.45"
