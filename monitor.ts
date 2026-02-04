@@ -88,16 +88,16 @@ async function fetchDeployments(): Promise<DeploymentEvent[]> {
   return (data as any).accountDeployeds?.items || []
 }
 
-async function postToDiscord(message: string) {
+async function postToDiscord(content?: string, embeds?: any[]) {
   if (!DISCORD_WEBHOOK) {
-    console.log('[Discord]', message)
+    console.log('[Discord]', content || embeds)
     return
   }
   
   await fetch(DISCORD_WEBHOOK, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ content: message })
+    body: JSON.stringify({ content, embeds })
   })
 }
 
@@ -105,22 +105,46 @@ async function processUserOps(ops: UserOpEvent[]) {
   for (const op of ops) {
     const status = op.success ? '✅' : '❌'
     const gasCostPLS = Number(op.actualGasCost) / 1e18
-    const sponsored = op.paymaster ? ' (sponsored)' : ''
+    const paymasterText = op.paymaster ? `[\`${op.paymaster.slice(0, 6)}…${op.paymaster.slice(-4)}\`](https://scan.pulsechain.com/address/${op.paymaster})` : 'Self-sponsored'
     
-    await postToDiscord(
-      `${status} UserOp: \`${op.sender.slice(0, 10)}...\` | Gas: ${gasCostPLS.toFixed(6)} PLS${sponsored}`
-    )
+    const embed = {
+      title: `${status} UserOperation — PulseChain v0_7`,
+      color: op.success ? 0x00cc66 : 0xff0000,
+      timestamp: new Date(op.timestamp * 1000).toISOString(),
+      fields: [
+        { name: 'Chain', value: 'PulseChain (369)', inline: true },
+        { name: 'Sender', value: `[\`${op.sender.slice(0, 6)}…${op.sender.slice(-4)}\`](https://scan.pulsechain.com/address/${op.sender})`, inline: true },
+        { name: 'Paymaster', value: paymasterText, inline: true },
+        { name: 'Gas Cost', value: `${gasCostPLS.toFixed(4)} PLS`, inline: true },
+        { name: 'Tx', value: `[\`${op.txHash.slice(0, 6)}…${op.txHash.slice(-4)}\`](https://scan.pulsechain.com/tx/${op.txHash})`, inline: true },
+        { name: 'Block', value: op.blockNumber, inline: true },
+        { name: 'EntryPoint', value: 'v0_7', inline: true }
+      ],
+      footer: { text: `UserOp ${op.id.slice(0, 6)}…${op.id.slice(-4)} | PulseChain` }
+    }
     
+    await postToDiscord(undefined, [embed])
     console.log(`[UserOp] ${op.txHash} | ${op.sender} | ${gasCostPLS.toFixed(6)} PLS | Success: ${op.success}`)
   }
 }
 
 async function processDeployments(deployments: DeploymentEvent[]) {
   for (const deploy of deployments) {
-    await postToDiscord(
-      `🎉 New AA Wallet: \`${deploy.account}\` via \`${deploy.factory.slice(0, 10)}...\``
-    )
+    const embed = {
+      title: '🎉 Account Deployed — PulseChain v0_7',
+      color: 0x5865f2,
+      timestamp: new Date(deploy.timestamp * 1000).toISOString(),
+      fields: [
+        { name: 'Chain', value: 'PulseChain (369)', inline: true },
+        { name: 'Account', value: `[\`${deploy.account.slice(0, 6)}…${deploy.account.slice(-4)}\`](https://scan.pulsechain.com/address/${deploy.account})`, inline: true },
+        { name: 'Factory', value: `[\`${deploy.factory.slice(0, 6)}…${deploy.factory.slice(-4)}\`](https://scan.pulsechain.com/address/${deploy.factory})`, inline: true },
+        { name: 'EntryPoint', value: `[\`${deploy.entryPoint.slice(0, 6)}…${deploy.entryPoint.slice(-4)}\`](https://scan.pulsechain.com/address/${deploy.entryPoint})`, inline: true },
+        { name: 'Block', value: deploy.blockNumber, inline: true }
+      ],
+      footer: { text: `Account Deployment | PulseChain` }
+    }
     
+    await postToDiscord(undefined, [embed])
     console.log(`[Deploy] ${deploy.account} | Factory: ${deploy.factory}`)
   }
 }
