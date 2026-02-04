@@ -2,11 +2,11 @@
 /**
  * Belt UserOp Monitor
  * 
- * Polls belt-indexer GraphQL API for new events using cursor-based pagination.
- * Posts notifications to Discord #belt-user-ops channel.
- * Uses Redis for deduplication and state tracking.
+ * Independent notification service for Belt AA operations.
+ * Uses the SAME Redis instance and key structure as belt-indexer.
  * 
- * This is completely independent of the indexer - all notification logic lives here.
+ * Indexer tracks watermarks; this service reads them and sends Discord notifications.
+ * Separation of concerns: Indexer indexes, Monitor notifies.
  */
 
 import { GraphQLClient, gql } from 'graphql-request'
@@ -15,7 +15,12 @@ import Redis from 'ioredis'
 const INDEXER_URL = process.env.BELT_INDEXER_URL || 'https://belt-indexer-production.up.railway.app/graphql'
 const POLL_INTERVAL_MS = 10_000 // 10 seconds
 const DISCORD_WEBHOOK = process.env.DISCORD_WEBHOOK_URL
-const REDIS_URL = process.env.REDIS_URL
+const REDIS_URL = process.env.REDIS_URL || 'redis://localhost:6379'
+
+// Redis keys matching indexer pattern
+const WATERMARK_PREFIX = 'belt:notifications:watermark'
+const EVENT_PREFIX = 'belt:notifications:event:'
+const EVENT_TTL = 60 * 60 * 24 * 30 // 30 days (matches indexer)
 
 interface UserOpEvent {
   id: string
@@ -26,6 +31,7 @@ interface UserOpEvent {
   success: boolean
   blockNumber: string
   timestamp: number
+  entryPointVersion: string
 }
 
 interface DeploymentEvent {
@@ -37,13 +43,13 @@ interface DeploymentEvent {
   timestamp: number
 }
 
-const redis = REDIS_URL ? new Redis(REDIS_URL, {
+const redis = new Redis(REDIS_URL, {
   maxRetriesPerRequest: 3,
   retryStrategy(times) {
     const delay = Math.min(times * 50, 2000)
     return delay
   }
-}) : null
+})
 
 const client = new GraphQLClient(INDEXER_URL)
 
@@ -64,6 +70,7 @@ const USER_OPS_QUERY = gql`
         success
         blockNumber
         timestamp
+        entryPointVersion
       }
     }
   }
@@ -89,28 +96,59 @@ const DEPLOYMENTS_QUERY = gql`
   }
 `
 
-async function getLastProcessedBlock(): Promise<string> {
-  if (!redis) return '0'
-  const block = await redis.get('belt-monitor:last-block')
-  return block || '0'
+/**
+ * Build watermark key matching indexer pattern.
+ * e.g. "belt:notifications:watermark:369:EntryPointV07"
+ */
+function watermarkKey(chainId: number, contract: string): string {
+  return `${WATERMARK_PREFIX}:${chainId}:${contract}`
 }
 
-async function setLastProcessedBlock(block: string): Promise<void> {
-  if (!redis) return
-  await redis.set('belt-monitor:last-block', block)
+/**
+ * Get the current watermark for a chain+contract.
+ * This tells us what's already been notified.
+ */
+async function getWatermark(chainId: number = 369, contract: string = 'default'): Promise<string> {
+  const wm = await redis.get(watermarkKey(chainId, contract))
+  return wm || '0'
 }
 
-async function isAlreadyNotified(type: 'userop' | 'deployment', id: string): Promise<boolean> {
-  if (!redis) return false
-  const key = `notified:${type}:${id}`
-  return (await redis.exists(key)) === 1
-}
-
-async function markAsNotified(type: 'userop' | 'deployment', id: string): Promise<void> {
-  if (!redis) return
-  const key = `notified:${type}:${id}`
-  // Expire after 7 days
-  await redis.set(key, '1', 'EX', 60 * 60 * 24 * 7)
+/**
+ * Check if event should be notified.
+ * Uses the SAME logic as the indexer's shouldNotify().
+ */
+async function shouldNotify(
+  eventId: string,
+  blockNumber: string,
+  chainId: number = 369,
+  contract: string = 'default'
+): Promise<boolean> {
+  const wmKey = watermarkKey(chainId, contract)
+  const watermark = await redis.get(wmKey)
+  
+  if (watermark) {
+    const bn = BigInt(blockNumber)
+    const wm = BigInt(watermark)
+    
+    // Below watermark - skip
+    if (bn < wm) return false
+    
+    // Same block as watermark - check individual event
+    if (bn === wm) {
+      const exists = await redis.exists(`${EVENT_PREFIX}${eventId}`)
+      if (exists) return false
+    }
+  }
+  
+  // Record this event
+  await redis.set(`${EVENT_PREFIX}${eventId}`, '1', 'EX', EVENT_TTL)
+  
+  // Update watermark if newer
+  if (!watermark || BigInt(blockNumber) > BigInt(watermark)) {
+    await redis.set(wmKey, blockNumber)
+  }
+  
+  return true
 }
 
 async function postToDiscord(content?: string, embeds?: any[]) {
@@ -120,55 +158,67 @@ async function postToDiscord(content?: string, embeds?: any[]) {
   }
   
   try {
-    await fetch(DISCORD_WEBHOOK, {
+    const res = await fetch(DISCORD_WEBHOOK, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ content, embeds })
+      body: JSON.stringify({ 
+        username: 'Belt UserOps Monitor',
+        content, 
+        embeds 
+      })
     })
+    
+    if (!res.ok && res.status !== 429) {
+      console.error(`[Discord] Webhook failed: ${res.status}`)
+    }
   } catch (err) {
     console.error('[Discord Error]', err)
   }
 }
 
+function shortenAddr(addr: string): string {
+  if (!addr || addr === '0x0000000000000000000000000000000000000000') return 'none'
+  return `${addr.slice(0, 6)}…${addr.slice(-4)}`
+}
+
 async function processUserOp(op: UserOpEvent) {
-  // Check if already notified
-  if (await isAlreadyNotified('userop', op.id)) {
+  // Check if already notified (using indexer's pattern)
+  const isNew = await shouldNotify(op.id, op.blockNumber, 369, 'EntryPointV07')
+  if (!isNew) {
     console.log(`[Skip] UserOp ${op.id} already notified`)
     return
   }
 
   const status = op.success ? '✅' : '❌'
   const gasCostPLS = Number(op.actualGasCost) / 1e18
-  const paymasterText = op.paymaster 
-    ? `[\`${op.paymaster.slice(0, 6)}…${op.paymaster.slice(-4)}\`](https://scan.pulsechain.com/address/${op.paymaster})` 
+  const paymasterText = op.paymaster && op.paymaster !== '0x0000000000000000000000000000000000000000'
+    ? `[\`${shortenAddr(op.paymaster)}\`](https://scan.pulsechain.com/address/${op.paymaster})` 
     : 'Self-sponsored'
   
   const embed = {
-    title: `${status} UserOperation — PulseChain v0_7`,
+    title: `${status} UserOperation — PulseChain ${op.entryPointVersion || 'v0_7'}`,
     color: op.success ? 0x00cc66 : 0xff0000,
     timestamp: new Date(op.timestamp * 1000).toISOString(),
     fields: [
       { name: 'Chain', value: 'PulseChain (369)', inline: true },
-      { name: 'Sender', value: `[\`${op.sender.slice(0, 6)}…${op.sender.slice(-4)}\`](https://scan.pulsechain.com/address/${op.sender})`, inline: true },
+      { name: 'Sender', value: `[\`${shortenAddr(op.sender)}\`](https://scan.pulsechain.com/address/${op.sender})`, inline: true },
       { name: 'Paymaster', value: paymasterText, inline: true },
       { name: 'Gas Cost', value: `${gasCostPLS.toFixed(4)} PLS`, inline: true },
-      { name: 'Tx', value: `[\`${op.txHash.slice(0, 6)}…${op.txHash.slice(-4)}\`](https://scan.pulsechain.com/tx/${op.txHash})`, inline: true },
+      { name: 'Tx', value: `[\`${shortenAddr(op.txHash)}\`](https://scan.pulsechain.com/tx/${op.txHash})`, inline: true },
       { name: 'Block', value: op.blockNumber, inline: true },
-      { name: 'EntryPoint', value: 'v0_7', inline: true }
+      { name: 'EntryPoint', value: op.entryPointVersion || 'v0_7', inline: true }
     ],
-    footer: { text: `UserOp ${op.id.slice(0, 6)}…${op.id.slice(-4)} | PulseChain` }
+    footer: { text: `UserOp ${shortenAddr(op.id)} | PulseChain` }
   }
   
   await postToDiscord(undefined, [embed])
   console.log(`[UserOp] ${op.txHash} | ${op.sender} | ${gasCostPLS.toFixed(6)} PLS | Success: ${op.success}`)
-  
-  // Mark as notified
-  await markAsNotified('userop', op.id)
 }
 
 async function processDeployment(deploy: DeploymentEvent) {
-  // Check if already notified
-  if (await isAlreadyNotified('deployment', deploy.id)) {
+  // Check if already notified (using indexer's pattern)
+  const isNew = await shouldNotify(deploy.id, deploy.blockNumber, 369, 'EntryPointV07')
+  if (!isNew) {
     console.log(`[Skip] Deployment ${deploy.id} already notified`)
     return
   }
@@ -179,9 +229,9 @@ async function processDeployment(deploy: DeploymentEvent) {
     timestamp: new Date(deploy.timestamp * 1000).toISOString(),
     fields: [
       { name: 'Chain', value: 'PulseChain (369)', inline: true },
-      { name: 'Account', value: `[\`${deploy.account.slice(0, 6)}…${deploy.account.slice(-4)}\`](https://scan.pulsechain.com/address/${deploy.account})`, inline: true },
-      { name: 'Factory', value: `[\`${deploy.factory.slice(0, 6)}…${deploy.factory.slice(-4)}\`](https://scan.pulsechain.com/address/${deploy.factory})`, inline: true },
-      { name: 'EntryPoint', value: `[\`${deploy.entryPoint.slice(0, 6)}…${deploy.entryPoint.slice(-4)}\`](https://scan.pulsechain.com/address/${deploy.entryPoint})`, inline: true },
+      { name: 'Account', value: `[\`${shortenAddr(deploy.account)}\`](https://scan.pulsechain.com/address/${deploy.account})`, inline: true },
+      { name: 'Factory', value: `[\`${shortenAddr(deploy.factory)}\`](https://scan.pulsechain.com/address/${deploy.factory})`, inline: true },
+      { name: 'EntryPoint', value: `[\`${shortenAddr(deploy.entryPoint)}\`](https://scan.pulsechain.com/address/${deploy.entryPoint})`, inline: true },
       { name: 'Block', value: deploy.blockNumber, inline: true }
     ],
     footer: { text: `Account Deployment | PulseChain` }
@@ -189,9 +239,6 @@ async function processDeployment(deploy: DeploymentEvent) {
   
   await postToDiscord(undefined, [embed])
   console.log(`[Deploy] ${deploy.account} | Factory: ${deploy.factory}`)
-  
-  // Mark as notified
-  await markAsNotified('deployment', deploy.id)
 }
 
 async function fetchUserOps(since: string): Promise<UserOpEvent[]> {
@@ -206,7 +253,8 @@ async function fetchDeployments(since: string): Promise<DeploymentEvent[]> {
 
 async function poll() {
   try {
-    const lastBlock = await getLastProcessedBlock()
+    // Read watermark from Redis (what indexer has already marked)
+    const lastBlock = await getWatermark(369, 'EntryPointV07')
     
     const [ops, deployments] = await Promise.all([
       fetchUserOps(lastBlock),
@@ -222,19 +270,7 @@ async function poll() {
       await processDeployment(deploy)
     }
     
-    // Update last processed block
-    const allEvents = [...ops, ...deployments]
-    if (allEvents.length > 0) {
-      const maxBlock = allEvents.reduce((max, evt) => {
-        const evtBlock = Number(evt.blockNumber)
-        return evtBlock > Number(max) ? evt.blockNumber : max
-      }, lastBlock)
-      
-      if (Number(maxBlock) > Number(lastBlock)) {
-        await setLastProcessedBlock(maxBlock)
-        console.log(`[State] Updated last block to ${maxBlock}`)
-      }
-    } else {
+    if (ops.length === 0 && deployments.length === 0) {
       console.log(`[Poll] No new events since block ${lastBlock}`)
     }
   } catch (err) {
@@ -245,14 +281,13 @@ async function poll() {
 async function main() {
   console.log('🔍 Belt UserOp Monitor starting...')
   console.log(`📊 Indexer: ${INDEXER_URL}`)
-  console.log(`🔴 Redis: ${REDIS_URL || 'disabled (no deduplication)'}`)
+  console.log(`🔴 Redis: ${REDIS_URL}`)
   console.log(`⏱️  Poll interval: ${POLL_INTERVAL_MS}ms`)
+  console.log('📡 Using indexer Redis keys (belt:notifications:*)')
   
-  // Wait for Redis connection if enabled
-  if (redis) {
-    await redis.ping()
-    console.log('✅ Redis connected')
-  }
+  // Wait for Redis connection
+  await redis.ping()
+  console.log('✅ Redis connected')
 
   // Initial poll
   await poll()
@@ -263,7 +298,7 @@ async function main() {
   // Graceful shutdown
   process.on('SIGINT', async () => {
     console.log('\n👋 Shutting down...')
-    if (redis) await redis.quit()
+    await redis.quit()
     process.exit(0)
   })
 }
