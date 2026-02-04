@@ -35,7 +35,7 @@ interface DeploymentEvent {
 const client = new GraphQLClient(INDEXER_URL)
 
 const USER_OPS_QUERY = gql`
-  query GetRecentUserOps($since: String!) {
+  query GetRecentUserOps($since: BigInt!) {
     userOperations(
       where: { blockNumber_gt: $since }
       orderBy: "blockNumber"
@@ -57,7 +57,7 @@ const USER_OPS_QUERY = gql`
 `
 
 const DEPLOYMENTS_QUERY = gql`
-  query GetRecentDeployments($since: String!) {
+  query GetRecentDeployments($since: BigInt!) {
     accountDeployeds(
       where: { blockNumber_gt: $since }
       orderBy: "blockNumber"
