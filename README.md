@@ -20,12 +20,33 @@ Monitors the [belt-indexer](https://github.com/moltmorbius/belt-indexer) GraphQL
 
 ## Usage
 
+### Local Development
 ```bash
 npm install
-npm run monitor
+npm run dev
 ```
 
-Typically runs as a background process or cron job.
+### Production (Railway)
+
+1. **Deploy to Railway:**
+   - Connect your GitHub repository
+   - Railway will auto-detect the nixpacks build
+   - Set environment variables (see below)
+
+2. **Configure Environment Variables:**
+   ```
+   DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/YOUR_WEBHOOK_ID/YOUR_WEBHOOK_TOKEN
+   ```
+   Optional:
+   ```
+   BELT_INDEXER_URL=https://belt-indexer-production.up.railway.app/sql
+   ```
+
+3. **Deploy:**
+   - Railway will automatically build and start the monitor
+   - Restarts on crash (configured in `railway.toml`)
+
+The service runs continuously and polls every 15 seconds.
 
 ## Environment
 

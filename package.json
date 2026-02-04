@@ -4,6 +4,7 @@
   "description": "Belt AA operations monitoring — UserOps, deployments, profit tracking",
   "type": "module",
   "scripts": {
+    "start": "tsx monitor.ts",
     "monitor": "tsx monitor.ts",
     "dev": "tsx watch monitor.ts",
     "typecheck": "tsc --noEmit"
