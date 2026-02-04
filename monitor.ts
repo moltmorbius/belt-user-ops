@@ -14,12 +14,12 @@ const DISCORD_WEBHOOK = process.env.DISCORD_WEBHOOK_URL
 
 interface UserOpEvent {
   id: string
-  userOpHash: string
+  txHash: string
   sender: string
   paymaster: string | null
-  actualGasCost: bigint
+  actualGasCost: string
   success: boolean
-  blockNumber: bigint
+  blockNumber: string
   timestamp: number
 }
 
@@ -28,60 +28,62 @@ interface DeploymentEvent {
   account: string
   factory: string
   entryPoint: string
-  blockNumber: bigint
+  blockNumber: string
   timestamp: number
 }
 
 const client = new GraphQLClient(INDEXER_URL)
 
 const USER_OPS_QUERY = gql`
-  query GetRecentUserOps($since: BigInt!) {
+  query GetRecentUserOps($since: String!) {
     userOperations(
-      where: { blockNumber_gt: $since }
-      orderBy: blockNumber
-      orderDirection: asc
+      filter: { blockNumber: { greaterThan: $since } }
+      orderBy: BLOCK_NUMBER_ASC
       first: 100
     ) {
-      id
-      userOpHash
-      sender
-      paymaster
-      actualGasCost
-      success
-      blockNumber
-      timestamp
+      items {
+        id
+        txHash
+        sender
+        paymaster
+        actualGasCost
+        success
+        blockNumber
+        timestamp
+      }
     }
   }
 `
 
 const DEPLOYMENTS_QUERY = gql`
-  query GetRecentDeployments($since: BigInt!) {
-    accountDeployments(
-      where: { blockNumber_gt: $since }
-      orderBy: blockNumber
-      orderDirection: asc
+  query GetRecentDeployments($since: String!) {
+    accountDeployeds(
+      filter: { blockNumber: { greaterThan: $since } }
+      orderBy: BLOCK_NUMBER_ASC
       first: 100
     ) {
-      id
-      account
-      factory
-      entryPoint
-      blockNumber
-      timestamp
+      items {
+        id
+        account
+        factory
+        entryPoint
+        blockNumber
+        timestamp
+      }
     }
   }
 `
 
-let lastCheckedBlock = BigInt(0)
+let lastCheckedBlock = '0'
 
 async function fetchUserOps(): Promise<UserOpEvent[]> {
-  const data = await client.request(USER_OPS_QUERY, { since: lastCheckedBlock.toString() })
-  return (data as any).userOperations || []
+  const data = await client.request(USER_OPS_QUERY, { since: lastCheckedBlock })
+  return (data as any).userOperations?.items || []
 }
 
 async function fetchDeployments(): Promise<DeploymentEvent[]> {
-  const data = await client.request(DEPLOYMENTS_QUERY, { since: lastCheckedBlock.toString() })
-  return (data as any).accountDeployments || []
+  const data = await client.request(DEPLOYMENTS_QUERY, { since: lastCheckedBlock })
+  return (data as any).accountDeployeds?.items || []
 }
 
 async function postToDiscord(message: string) {
@@ -107,7 +109,7 @@ async function processUserOps(ops: UserOpEvent[]) {
       `${status} UserOp: \`${op.sender.slice(0, 10)}...\` | Gas: ${gasCostPLS.toFixed(6)} PLS${sponsored}`
     )
     
-    console.log(`[UserOp] ${op.userOpHash} | ${op.sender} | ${gasCostPLS.toFixed(6)} PLS | Success: ${op.success}`)
+    console.log(`[UserOp] ${op.txHash} | ${op.sender} | ${gasCostPLS.toFixed(6)} PLS | Success: ${op.success}`)
   }
 }
 
@@ -130,14 +132,14 @@ async function poll() {
     
     if (ops.length > 0) {
       await processUserOps(ops)
-      const maxBlock = ops.reduce((max, op) => op.blockNumber > max ? op.blockNumber : max, BigInt(0))
-      if (maxBlock > lastCheckedBlock) lastCheckedBlock = maxBlock
+      const maxBlock = ops.reduce((max, op) => Number(op.blockNumber) > Number(max) ? op.blockNumber : max, '0')
+      if (Number(maxBlock) > Number(lastCheckedBlock)) lastCheckedBlock = maxBlock
     }
     
     if (deployments.length > 0) {
       await processDeployments(deployments)
-      const maxBlock = deployments.reduce((max, d) => d.blockNumber > max ? d.blockNumber : max, BigInt(0))
-      if (maxBlock > lastCheckedBlock) lastCheckedBlock = maxBlock
+      const maxBlock = deployments.reduce((max, d) => Number(d.blockNumber) > Number(max) ? d.blockNumber : max, '0')
+      if (Number(maxBlock) > Number(lastCheckedBlock)) lastCheckedBlock = maxBlock
     }
     
     if (ops.length === 0 && deployments.length === 0) {
