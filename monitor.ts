@@ -37,9 +37,10 @@ const client = new GraphQLClient(INDEXER_URL)
 const USER_OPS_QUERY = gql`
   query GetRecentUserOps($since: String!) {
     userOperations(
-      filter: { blockNumber: { greaterThan: $since } }
-      orderBy: BLOCK_NUMBER_ASC
-      first: 100
+      where: { blockNumber_gt: $since }
+      orderBy: "blockNumber"
+      orderDirection: "asc"
+      limit: 100
     ) {
       items {
         id
@@ -58,9 +59,10 @@ const USER_OPS_QUERY = gql`
 const DEPLOYMENTS_QUERY = gql`
   query GetRecentDeployments($since: String!) {
     accountDeployeds(
-      filter: { blockNumber: { greaterThan: $since } }
-      orderBy: BLOCK_NUMBER_ASC
-      first: 100
+      where: { blockNumber_gt: $since }
+      orderBy: "blockNumber"
+      orderDirection: "asc"
+      limit: 100
     ) {
       items {
         id
